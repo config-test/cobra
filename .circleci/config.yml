@@ -1,0 +1,137 @@
+version: 2.1
+
+# Mirrors .github/workflows/test.yml (the source of truth for this repo's CI).
+# GitHub Actions triggers `on: [push, pull_request, workflow_dispatch]`; CircleCI
+# builds every push by default, which covers push + pull_request. `workflow_dispatch`
+# has no direct equivalent -- re-run from the CircleCI UI or the v2 pipeline API.
+
+commands:
+  restore-go-mod-cache:
+    description: Restore the module cache, keyed on the checksum of go.sum.
+    parameters:
+      key-prefix:
+        type: string
+    steps:
+      - restore_cache:
+          keys:
+            - << parameters.key-prefix >>-gomod-{{ checksum "go.sum" }}
+            - << parameters.key-prefix >>-gomod-
+
+  save-go-mod-cache:
+    parameters:
+      key-prefix:
+        type: string
+    steps:
+      - save_cache:
+          key: << parameters.key-prefix >>-gomod-{{ checksum "go.sum" }}
+          paths:
+            - /home/circleci/go/pkg/mod
+
+jobs:
+  # Mirrors the `lic-headers` job. Uses a machine executor because the upstream step
+  # bind-mounts the workspace into the addlicense container, which `setup_remote_docker`
+  # cannot do.
+  lic-headers:
+    machine:
+      image: ubuntu-2404:current
+    steps:
+      - checkout
+      - run:
+          name: Check Apache license headers
+          command: |
+            docker run \
+              -v "$(pwd)":/wrk -w /wrk \
+              ghcr.io/google/addlicense \
+              -c 'The Cobra Authors' \
+              -y '2013-2023' \
+              -l apache \
+              -ignore '.github/**' \
+              -check \
+              .
+
+  # Mirrors the `golangci-lint` job. Upstream pins golangci/golangci-lint-action@v8.0.0
+  # with `version: latest`, which resolves to the latest golangci-lint v2.x -- matching
+  # the `version: "2"` schema in .golangci.yml.
+  golangci-lint:
+    docker:
+      # Upstream requests Go '^1.22' with check-latest; 1.24 is the newest version in
+      # this repo's own test matrix.
+      - image: cimg/go:1.24
+    environment:
+      GO111MODULE: "on"
+    steps:
+      - checkout
+      - restore-go-mod-cache:
+          key-prefix: lint
+      - run:
+          name: Install golangci-lint
+          command: |
+            curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
+              | sh -s -- -b "$(go env GOPATH)/bin" latest
+            golangci-lint --version
+      - run:
+          name: make lint
+          command: make lint
+      - save-go-mod-cache:
+          key-prefix: lint
+
+  # Mirrors the Linux half of the `test-unix` matrix.
+  # The macOS half is NOT included -- see the note in the workflows section below.
+  test-unix:
+    parameters:
+      go-version:
+        type: string
+    docker:
+      - image: cimg/go:<< parameters.go-version >>
+    environment:
+      GO111MODULE: "on"
+      RICHGO_FORCE_COLOR: "1"
+    steps:
+      - checkout
+      - restore-go-mod-cache:
+          key-prefix: test-<< parameters.go-version >>
+      - run:
+          name: Install richgo and gox
+          command: |
+            export GOBIN=$HOME/go/bin
+            go install github.com/kyoh86/richgo@latest
+            go install github.com/mitchellh/gox@latest
+      - run:
+          name: make richtest
+          command: PATH=$HOME/go/bin:$PATH make richtest
+      - save-go-mod-cache:
+          key-prefix: test-<< parameters.go-version >>
+      # No store_test_results: `make richtest` (richgo) emits human-readable output,
+      # not JUnit XML, and neither this Makefile nor the GitHub Actions workflow
+      # produces a report file. To enable it, add a JUnit-emitting target to the
+      # Makefile (e.g. gotestsum --junitfile) and then store its output here.
+
+workflows:
+  ci:
+    jobs:
+      # All jobs are independent and run in parallel -- no `requires` edges, matching
+      # the upstream workflow.
+      - lic-headers
+      - golangci-lint
+      - test-unix:
+          matrix:
+            parameters:
+              go-version: ["1.17", "1.18", "1.19", "1.20", "1.21", "1.22", "1.23", "1.24"]
+
+  # NOT TRANSLATED 1:1 -- left out deliberately rather than guessed at:
+  #
+  # 1. `test-unix` macOS leg (matrix.platform: macOS). CircleCI macOS executors are a
+  #    paid resource class and have no cimg/go equivalent, so Go would have to be
+  #    installed per-version at runtime. To add it, use a `macos: xcode: <version>`
+  #    executor and preserve the upstream flag for Go < 1.24:
+  #        GO_TEST_FLAGS: -ldflags=-linkmode=external
+  #
+  # 2. `test-win` (windows-latest + msys2/setup-msys2@v2, MINGW64). CircleCI's Windows
+  #    executor requires the `circleci/windows` orb and a paid resource class, and ships
+  #    no MSYS2/MINGW64 environment, so the shell semantics are not reproducible as-is.
+  #
+  # 3. .github/workflows/labeler.yml (actions/labeler@v5 on pull_request_target). This is
+  #    a GitHub-native PR-labeling automation with no CircleCI equivalent; keep it on
+  #    GitHub Actions. If you ever reimplement it here, it would need a GitHub token
+  #    exposed as a project env var (e.g. GITHUB_TOKEN) -- no secret is referenced in
+  #    this config today.

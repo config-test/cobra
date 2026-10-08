@@ -1,0 +1,46 @@
+version: 2.1
+
+jobs:
+  go:
+    docker:
+      # Match the newest Go version in .github/workflows/test.yml.
+      - image: cimg/go:1.24
+    environment:
+      GO111MODULE: "on"
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - go-v1-1.24-{{ arch }}-{{ checksum "go.sum" }}
+      - run:
+          name: Install dependencies
+          command: |
+            # The image bundles golangci-lint v1; .golangci.yml requires v2.
+            case "$(uname -m)" in
+              x86_64) lint_arch=amd64 ;;
+              aarch64) lint_arch=arm64 ;;
+              *) echo "Unsupported architecture"; exit 1 ;;
+            esac
+            curl -fsSL --retry 3 "https://github.com/golangci/golangci-lint/releases/download/v2.14.0/golangci-lint-2.14.0-linux-${lint_arch}.tar.gz" -o /tmp/golangci-lint.tar.gz
+            tar -xzf /tmp/golangci-lint.tar.gz -C /tmp
+            mkdir -p "$HOME/go/bin"
+            cp "/tmp/golangci-lint-2.14.0-linux-${lint_arch}/golangci-lint" "$HOME/go/bin/golangci-lint"
+            make install_deps
+      - save_cache:
+          key: go-v1-1.24-{{ arch }}-{{ checksum "go.sum" }}
+          paths:
+            - ~/go/pkg/mod
+      # This library has no standalone build command; tests compile its packages.
+      - run:
+          name: Test
+          command: make test
+      - run:
+          name: Check formatting and lint
+          command: |
+            make fmt
+            make lint
+
+workflows:
+  ci:
+    jobs:
+      - go

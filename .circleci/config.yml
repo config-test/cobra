@@ -1,0 +1,39 @@
+version: 2.1
+
+jobs:
+  go:
+    docker:
+      - image: cimg/go:1.24
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - go-v1-1.24-lint-2.14.0-{{ arch }}-{{ checksum "go.sum" }}
+      - run:
+          name: Install dependencies and lint tool
+          command: |
+            make install_deps
+            # The image's bundled v1 linter cannot read .golangci.yml (v2).
+            mkdir -p "$(go env GOPATH)/bin"
+            curl -fsSL "https://github.com/golangci/golangci-lint/releases/download/v2.14.0/golangci-lint-2.14.0-linux-$(go env GOARCH).tar.gz" \
+              | tar -xz --strip-components=1 -C "$(go env GOPATH)/bin" \
+                  "golangci-lint-2.14.0-linux-$(go env GOARCH)/golangci-lint"
+      - save_cache:
+          key: go-v1-1.24-lint-2.14.0-{{ arch }}-{{ checksum "go.sum" }}
+          paths:
+            - ~/go/pkg/mod
+            - ~/.cache/go-build
+      # No standalone build command is defined; make test compiles the packages.
+      - run:
+          name: Test
+          command: make test
+      - run:
+          name: Check formatting and lint
+          command: |
+            export PATH="$(go env GOPATH)/bin:$PATH"
+            make fmt lint
+
+workflows:
+  ci:
+    jobs:
+      - go
